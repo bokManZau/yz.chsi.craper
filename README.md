@@ -2,7 +2,7 @@
 
 [![PowerShell](https://img.shields.io/badge/PowerShell-5.1%2B-blue)]()
 
-**无需安装任何程序**，纯 PowerShell 脚本，Windows 系统自带即可运行。
+**无需安装任何程序,无需配置环境等**，纯 PowerShell 脚本，Windows 系统自带即可运行。
 
 从 [研招网](https://yz.chsi.com.cn/zsml/) 的硕士专业详情页抓取数据，导出为 CSV 表格。
 
@@ -11,7 +11,7 @@
 1. 在浏览器打开 [研招网硕士专业目录](https://yz.chsi.com.cn/zsml/)
 2. 筛选到具体专业，复制地址栏 URL
 3. 双击 `双击运行.bat`（需已下载.ps1文件，或可以shift/crtl+右键单独运行.ps1文件）
-4. 粘贴 专业目录页的URL，按提示操作
+4. 粘贴 专业目录页的URL和cookies
 5. CSV 文件自动保存到桌面
 
 ## 输出字段
@@ -33,7 +33,7 @@
 
 ## Cookie 登录（最好必选，未获取登录cookie只能获取前十个）
 
-部分数据需要登录后可见。F12 → Network → 刷新页面 → 点击任意请求（.do文件） → 下拉复制 Cookie 值（很长一段），粘贴到脚本中即可。
+部分数据需要登录后可见。F12 → Network（网络） → 刷新页面 → 在Header（标头）点击任意请求（.do文件） → 下拉复制 Cookie 值（很长一段），粘贴到脚本中回车即可。
 
 ## 文件名格式
 
