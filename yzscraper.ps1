@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-  研招网硕士专业目录爬虫 — v2.2（输出格式优化）
+  研招网硕士专业目录爬虫 — v2.3（详情翻页 + 研究方向前缀 + 合并单元格）
 #>
 
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls11
@@ -146,9 +146,7 @@ function Get-SchoolList {
         try { $json = $jsonText | ConvertFrom-Json } catch {
             Write-Host "  [✗] 解析 JSON 失败" -ForegroundColor Red; break
         }
-        if (-not $json.flag -or -not $json.msg -or -not $json.msg.list) {
-            Write-Host "  [i] API 返回空，停止翻页" -ForegroundColor Yellow; break
-        }
+        if (-not $json.flag -or -not $json.msg -or -not $json.msg.list) { break }
 
         if ($json.msg.pageCount -and $json.msg.pageCount -gt 0) { $actualPageSize = $json.msg.pageCount }
         if ($json.msg.totalPage) { $totalPages = $json.msg.totalPage }
@@ -194,41 +192,56 @@ function Get-XxfsText {
     }
 }
 
-# ==========================  截取科目名（去掉 cksm 小字备注）=============
-
-function Format-Subject {
-    param([string]$Code, [string]$Name)
-    if (-not $Code -and -not $Name) { return "" }
-    if ($Code) {
-        return "($Code)$Name"
-    }
-    return $Name
-}
-
-# ==========================  获取研究方向详情  ===========================
+# ==========================  获取研究方向详情（含翻页）=====================
 
 function Get-Detail {
     param([hashtable]$Params, [hashtable]$School)
 
     $api = "$BASE/zsml/rs/yjfxs.do"
-    $body = @{
-        zydm = $Params.zydm; zymc = $Params.zymc
-        dwdm = $School.dwdm; xxfs = $School.mxxfs
-        dwlxs = $School.mdwlxs; tydxs = $School.mtydxs; jsggjh = $School.mjsggjh
-        start = 0; pageSize = 50; totalCount = 0
-    }
+    $allList = @()
+    $curPage = 1
+    $totalPages = 1
+    $pageSize = 10     # 与服务端默认一致
+    $totalCount = 0
 
-    $jsonText = Invoke-YZ -Url $api -Method POST -Body $body
-    if (-not $jsonText) { return @() }
+    do {
+        $start = ($curPage - 1) * $pageSize
+        $body = @{
+            zydm = $Params.zydm; zymc = $Params.zymc
+            dwdm = $School.dwdm; xxfs = $School.mxxfs
+            dwlxs = $School.mdwlxs; tydxs = $School.mtydxs; jsggjh = $School.mjsggjh
+            start = $start; curPage = $curPage; pageSize = $pageSize; totalCount = $totalCount
+        }
 
-    try { $json = $jsonText | ConvertFrom-Json } catch { return @() }
-    if (-not $json.flag -or -not $json.msg) { return @() }
+        if ($curPage -gt 1) {
+            Write-Host "    [详情翻页 $curPage] start=$start" -ForegroundColor DarkGray
+        }
 
-    $list = $json.msg.list
-    if (-not $list) { return @() }
+        $jsonText = Invoke-YZ -Url $api -Method POST -Body $body
+        if (-not $jsonText) { break }
+
+        try { $json = $jsonText | ConvertFrom-Json } catch { break }
+        if (-not $json.flag -or -not $json.msg) { break }
+
+        $list = $json.msg.list
+        if (-not $list -or $list.Count -eq 0) { break }
+
+        # 更新分页信息
+        if ($json.msg.pageCount -and $json.msg.pageCount -gt 0) { $pageSize = $json.msg.pageCount }
+        if ($json.msg.totalPage) { $totalPages = $json.msg.totalPage }
+        if ($json.msg.totalCount) { $totalCount = $json.msg.totalCount }
+
+        $allList += $list
+
+        if ($list.Count -lt $pageSize) { break }
+        $curPage++
+        if ($curPage -gt $totalPages -and $totalPages -gt 0) { break }
+    } while ($true)
+
+    if ($allList.Count -eq 0) { return @() }
 
     $records = @()
-    foreach ($item in $list) {
+    foreach ($item in $allList) {
         # ------ 拟招生人数 ------
         $nzsrs = ""
         if ($item.nzsrs -ne $null -and "$($item.nzsrs)" -ne "0") {
@@ -242,7 +255,7 @@ function Get-Detail {
             $nzsrs = if ($item.nzsrs -ne $null) { "$($item.nzsrs)" } else { "" }
         }
 
-        # ------ 所在地（学校列表API有 ssmc，详情API有 szss）------
+        # ------ 所在地 ------
         $ssmc = $School.ssmc
         if (-not $ssmc -and $item.szss -ne $null) { $ssmc = "$($item.szss)" }
 
@@ -254,32 +267,38 @@ function Get-Detail {
             $xxfsmc = Get-XxfsText -Val "$($item.xxfs)"
         }
 
-        # ------ 考试科目（去掉 cksm 备注）------
-        $examEnglish = ""; $examCourse1 = ""; $examCourse2 = ""
+        # ------ 研究方向（含前缀代码）------
+        $yjfxDisplay = ""
+        $yjfxCode = if ($item.yjfxdm -ne $null) { "$($item.yjfxdm)" } else { "" }
+        $yjfxName = if ($item.yjfxmc -ne $null) { "$($item.yjfxmc)" } else { "" }
+        if ($yjfxCode -and $yjfxCode -ne "00") {
+            $yjfxDisplay = "($yjfxCode)$yjfxName"
+        } else {
+            $yjfxDisplay = $yjfxName
+        }
+
+        # ------ 考试科目（支持多个可选组合，用"或"连接）------
+        $examEnglish = @(); $examCourse1 = @(); $examCourse2 = @()
 
         if ($item.kskmz -ne $null -and @($item.kskmz).Count -gt 0) {
-            $examGroup = @($item.kskmz)[0]
-            # km1Vo=政治（去掉），km2Vo=外语，km3Vo=业务课一，km4Vo=业务课二
-            $kmMap = @{
-                "km2Vo" = "外语"; "km3Vo" = "业务课一"; "km4Vo" = "业务课二"
-            }
-            $voMap = @{
-                "km2Vo" = "外语"; "km3Vo" = "业务课一"; "km4Vo" = "业务课二"
-            }
-
-            foreach ($key in @("km2Vo", "km3Vo", "km4Vo")) {
-                if ($examGroup.$key -ne $null) {
-                    $vo = $examGroup.$key
-                    $code = if ($vo.kskmdm -ne $null) { "$($vo.kskmdm)" } else { "" }
-                    $name = if ($vo.kskmmc -ne $null) { "$($vo.kskmmc)" } else { "" }
-                    $formatted = Format-Subject -Code $code -Name $name
-
-                    if ($key -eq "km2Vo") { $examEnglish = $formatted }
-                    elseif ($key -eq "km3Vo") { $examCourse1 = $formatted }
-                    elseif ($key -eq "km4Vo") { $examCourse2 = $formatted }
+            $kmMap = @{ "km2Vo" = "外语"; "km3Vo" = "业务课一"; "km4Vo" = "业务课二" }
+            foreach ($examGroup in @($item.kskmz)) {
+                foreach ($key in @("km2Vo", "km3Vo", "km4Vo")) {
+                    if ($examGroup.$key -ne $null) {
+                        $vo = $examGroup.$key
+                        $code = if ($vo.kskmdm -ne $null) { "$($vo.kskmdm)" } else { "" }
+                        $name = if ($vo.kskmmc -ne $null) { "$($vo.kskmmc)" } else { "" }
+                        $formatted = if ($code) { "($code)$name" } else { $name }
+                        if ($key -eq "km2Vo") { if ($examEnglish -notcontains $formatted) { $examEnglish += $formatted } }
+                        elseif ($key -eq "km3Vo") { if ($examCourse1 -notcontains $formatted) { $examCourse1 += $formatted } }
+                        elseif ($key -eq "km4Vo") { if ($examCourse2 -notcontains $formatted) { $examCourse2 += $formatted } }
+                    }
                 }
             }
         }
+        $examEnglish = $examEnglish -join " 或 "
+        $examCourse1 = $examCourse1 -join " 或 "
+        $examCourse2 = $examCourse2 -join " 或 "
 
         $records += @{
             院校代码 = $School.dwdm
@@ -288,7 +307,7 @@ function Get-Detail {
             院系所 = if ($item.yxsmc -ne $null) { "$($item.yxsmc)" } else { "" }
             专业 = if ($item.zymc -ne $null) { "$($item.zymc)" } else { "" }
             学习方式 = $xxfsmc
-            研究方向 = if ($item.yjfxmc -ne $null) { "$($item.yjfxmc)" } else { "" }
+            研究方向 = $yjfxDisplay
             拟招生人数 = $nzsrs
             外语 = $examEnglish
             业务课一 = $examCourse1
@@ -297,11 +316,15 @@ function Get-Detail {
         }
     }
 
-    Write-Host "    → $($records.Count) 条研究方向记录" -ForegroundColor Gray
+    if ($allList.Count -gt 10) {
+        Write-Host "    → $($records.Count) 条研究方向记录（翻页 $curPage 页）" -ForegroundColor Gray
+    } else {
+        Write-Host "    → $($records.Count) 条研究方向记录" -ForegroundColor Gray
+    }
     return $records
 }
 
-# ==========================  CSV 导出  ==================================
+# ==========================  CSV 导出（含合并相同单元格）==================
 
 $CSV_HEADERS = @("院校代码","招生单位","所在地","院系所","专业","学习方式","研究方向","拟招生人数","外语","业务课一","业务课二","备注")
 
@@ -310,13 +333,30 @@ function Export-Csv {
 
     if ($Records.Count -eq 0) { "无数据" | Out-File -FilePath $FilePath -Encoding utf8; return }
 
+    # 需要合并的列（相同值仅保留首次出现）
+    $mergeCols = @("院校代码", "招生单位", "院系所")
+
     $lines = @()
     $lines += $CSV_HEADERS -join ","
+
+    $prevValues = @{}
+    foreach ($h in $mergeCols) { $prevValues[$h] = $null }
+
     foreach ($rec in $Records) {
         $vals = @()
         foreach ($h in $CSV_HEADERS) {
             $v = $rec.$h
             if (-not $v) { $v = "" }
+
+            # 合并逻辑：相同值仅第一次显示
+            if ($mergeCols -contains $h) {
+                if ($v -eq $prevValues[$h]) {
+                    $v = ""  # 与前一行相同，留空
+                } else {
+                    $prevValues[$h] = $v  # 记录新值
+                }
+            }
+
             if ($v -match '[,"\n]') { $v = '"' + $v.Replace('"', '""') + '"' }
             $vals += $v
         }
@@ -335,7 +375,7 @@ function Export-Csv {
 
 Write-Host ""
 Write-Host "╔══════════════════════════════════════════════╗" -ForegroundColor Cyan
-Write-Host "║       研招网 · 硕士专业目录爬取工具 v2.2     ║" -ForegroundColor Cyan
+Write-Host "║       研招网 · 硕士专业目录爬取工具 v2.3     ║" -ForegroundColor Cyan
 Write-Host "╚══════════════════════════════════════════════╝" -ForegroundColor Cyan
 Write-Host ""
 
@@ -350,8 +390,7 @@ if (-not $params) {
 Write-Host "`n  [✓] 专业: $($params.zymc)（$($params.zydm)）" -ForegroundColor Green
 Write-Host "      门类/学科: $($params.mlmc) > $($params.yjxkmc)"
 
-# Cookie
-Write-Host "`n▸ 如需完整数据，请粘贴已登录的 Cookie（F12 → Network 复制）" -ForegroundColor Yellow
+Write-Host "`n▸ 如需完整数据，请粘贴已登录的 Cookie" -ForegroundColor Yellow
 $userCookie = Read-Host "  粘贴 Cookie（直接回车跳过）"
 if ($userCookie) {
     $script:CookieHeader = $userCookie
@@ -359,13 +398,11 @@ if ($userCookie) {
 }
 
 Write-Host "`n▸ 正在连接研招网 ..." -ForegroundColor Yellow
-
 $detailHtml = Invoke-YZ -Url $rawUrl
 if (-not $detailHtml) {
     Write-Host "  [✗] 无法连接" -ForegroundColor Red; Read-Host; exit
 }
 Write-Host "  [✓] 连接成功" -ForegroundColor Green
-
 $script:DetailReferer = $rawUrl
 
 $schools = Get-SchoolList -Params $params
@@ -381,7 +418,6 @@ foreach ($school in $schools) {
     Write-Host "`n  [$i/$($schools.Count)] [$($school.dwdm)] $($school.dwmc)（$($school.ssmc)）..." -ForegroundColor Cyan
     $details = Get-Detail -Params $params -School $school
     $allRecords += $details
-    if ($details.Count -eq 0) { Write-Host "    [i] 无研究方向数据" -ForegroundColor Yellow }
 }
 
 Write-Host "`n========================================" -ForegroundColor Cyan
@@ -389,20 +425,17 @@ Write-Host "  共获取 $($allRecords.Count) 条记录" -ForegroundColor Green
 
 if ($allRecords.Count -gt 0) {
     $desktop = [Environment]::GetFolderPath("Desktop")
-    $timestamp = [DateTime]::Now.ToString("yyyyMMdd_HHmmss")
-            # 生成文件名：专业代码+专业名称+学硕/专硕_专业目录.csv
-        $xwlxText = if ($params.xwlx -eq "ssxw") { "学硕" } elseif ($params.xwlx -eq "zyxw") { "专硕" } else { "" }
-        $safeName = "$($params.zydm)$($params.zymc)${xwlxText}_专业目录"
-    $filename = "${safeName}.csv"
+    $safeName = "$($params.zydm)$($params.zymc)"
+    $xwlxText = if ($params.xwlx -eq "ssxw") { "学硕" } elseif ($params.xwlx -eq "zyxw") { "专硕" } else { "" }
+    $filename = "${safeName}${xwlxText}_专业目录.csv"
     $filepath = Join-Path $desktop $filename
     Export-Csv -Records $allRecords -FilePath $filepath
     Write-Host "`n  [✓] 已保存到桌面: $filename" -ForegroundColor Green
-    Write-Host "  用 Excel 直接打开即可" -ForegroundColor White
+    Write-Host "  用 Excel 直接打开即可（相同院校/院系已合并显示）" -ForegroundColor White
 } else {
     Write-Host "  [i] 无数据可导出" -ForegroundColor Yellow
 }
 
 Write-Host "`n  按回车退出..."
 Read-Host
-
 
